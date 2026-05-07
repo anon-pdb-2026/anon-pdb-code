@@ -1,18 +1,23 @@
 #!/bin/bash
-# Bug correction + evaluation for ONE model across both datasets.
+# Bug correction + evaluation for ONE model on a PDB subset, fanned out
+# across that subset's source datasets.
 # All models use max_tokens=32000.
 #
 # Usage:  bash scripts/simple_debug_eval.sh <subset> <model>
-#   <subset>  ∈ {single, single-hard, multi}
+#   <subset>  ∈ {single, wild}
 #   <model>   full dspy model name, e.g. "openai/gpt-5.1-codex"
+#
+#   single -> single-line bug examples; iterates BCB + LCB.
+#             Reads results/<ds>/bug_data/<ds>_pdb_single.json
+#   wild   -> multi-line + repository-level bugs; iterates BCB + LCB + SWE-smith.
+#             Reads results/<ds>/bug_data/<ds>_pdb_wild.json
 #
 # Examples:
 #   bash scripts/simple_debug_eval.sh single openai/gpt-5.1-codex
-#   bash scripts/simple_debug_eval.sh multi gemini/gemini-2.5-pro
-#   bash scripts/simple_debug_eval.sh single-hard deepseek/deepseek-chat
+#   bash scripts/simple_debug_eval.sh wild   anthropic/claude-sonnet-4-5-20250929
 set -e
 
-SUBSET="${1:?missing subset (single | single-hard | multi)}"
+SUBSET="${1:?missing subset (single | wild)}"
 MODEL="${2:?missing model name}"
 
 # --- Run-wide knobs (edit here to change everything) ---
@@ -22,17 +27,18 @@ TEMPERATURE=1.0
 MAX_TOKENS=32000
 N_WORKERS=4
 
+# Map subset → file tag and source-dataset list. PDB-Wild adds the SWE-smith
+# Docker partition to the BCB / LCB multi-line set.
 case "$SUBSET" in
-  single)      FILE_TAG="pdb_single" ;;
-  single-hard) FILE_TAG="pdb_single_hard" ;;
-  multi)       FILE_TAG="pdb_multi" ;;
+  single) FILE_TAG="pdb_single";  DATASETS=("bigcodebench" "livecodebench") ;;
+  wild)   FILE_TAG="pdb_wild";    DATASETS=("bigcodebench" "livecodebench" "swesmith") ;;
   *)
-    echo "ERROR: unknown subset '$SUBSET' (expected: single | single-hard | multi)"
+    echo "ERROR: unknown subset '$SUBSET' (expected: single | wild)"
     exit 2
     ;;
 esac
 
-echo "Subset: $SUBSET    (file tag: $FILE_TAG)"
+echo "Subset: $SUBSET    (file tag: $FILE_TAG; datasets: ${DATASETS[*]})"
 echo "Model:  $MODEL"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,14 +62,13 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-# --- Multi subset requires --mode multi so tolerance defaults to 1 ---
+# --- Wild subset uses --mode multi so tolerance defaults to 1 ---
 MODE_ARGS=()
-if [[ "$SUBSET" == "multi" ]]; then
+if [[ "$SUBSET" == "wild" ]]; then
   MODE_ARGS=(--mode multi)
 fi
 
 # --- Sanity-check inputs first ---
-DATASETS=("bigcodebench" "livecodebench")
 for dataset in "${DATASETS[@]}"; do
   input="${dataset}_${FILE_TAG}.json"
   if [[ ! -f "results/$dataset/bug_data/$input" ]]; then
@@ -72,7 +77,7 @@ for dataset in "${DATASETS[@]}"; do
   fi
 done
 
-# --- Launch both datasets in parallel ---
+# --- Launch all source datasets in parallel ---
 LOG_DIR="$REPO_ROOT/bash_log"
 mkdir -p "$LOG_DIR"
 SHORT_MODEL="${MODEL##*/}"
@@ -121,9 +126,10 @@ echo "=== Union Summary ($MODEL, $SUBSET) ==="
 echo "============================================"
 # NOTE: [design thought] Per-dataset lines are already emitted by Evaluator
 # .print_summary() inside bug_correct.py's round loop. Here we only aggregate
-# them into a union across datasets.
+# them into a union across the subset's source datasets.
 
-FILE_TAG="$FILE_TAG" SHORT_MODEL="$SHORT_MODEL" MAX_ROUNDS="$MAX_ROUNDS" $PYTHON -c "
+FILE_TAG="$FILE_TAG" SHORT_MODEL="$SHORT_MODEL" MAX_ROUNDS="$MAX_ROUNDS" \
+  DATASETS_CSV="$(IFS=,; echo "${DATASETS[*]}")" $PYTHON -c "
 import json, os
 file_tag    = os.environ['FILE_TAG']
 short_model = os.environ['SHORT_MODEL']
@@ -131,7 +137,7 @@ short_model = os.environ['SHORT_MODEL']
 # are intermediate snapshots that get refined as failed attempts feed into
 # the next round.
 final_round = int(os.environ['MAX_ROUNDS'])
-datasets = ['bigcodebench', 'livecodebench']
+datasets = os.environ['DATASETS_CSV'].split(',')
 
 union = [0.0, 0.0, 0.0, 0.0, 0]  # unit, prec, rec, f1 sums + total n
 for dataset in datasets:

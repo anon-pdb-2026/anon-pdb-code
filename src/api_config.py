@@ -17,6 +17,8 @@ MODEL_KEY_MAP = {
     "gemini/": "google_key.txt",
     "deepseek/": "deepseek_key.txt",
     "xai/": "xai_key.txt",
+    "openrouter/": "openrouter_key.txt",
+    "vertex_ai/": None,  # ADC; returns None so caller omits api_key
 }
 
 
@@ -30,18 +32,15 @@ def resolve_api_key(model_name, model_api_file=None, keys_dir="keys"):
     Returns the API key string.
     """
     if model_api_file:
-        key_path = os.path.join(keys_dir, model_api_file)
-    else:
-        key_path = None
-        for prefix, key_file in MODEL_KEY_MAP.items():
-            if model_name.startswith(prefix):
-                key_path = os.path.join(keys_dir, key_file)
-                break
+        return open(os.path.join(keys_dir, model_api_file), "r").read().strip()
 
-        if key_path is None:
-            raise ValueError(
-                f"No API key mapping found for model '{model_name}'. "
-                f"Either pass --model_api_file or add a mapping in api_config.py."
-            )
+    for prefix, key_file in MODEL_KEY_MAP.items():
+        if model_name.startswith(prefix):
+            if key_file is None:
+                return None
+            return open(os.path.join(keys_dir, key_file), "r").read().strip()
 
-    return open(key_path, "r").read().strip()
+    raise ValueError(
+        f"No API key mapping found for model '{model_name}'. "
+        f"Either pass --model_api_file or add a mapping in api_config.py."
+    )

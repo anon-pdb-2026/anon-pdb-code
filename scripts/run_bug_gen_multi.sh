@@ -140,7 +140,7 @@ for dataset in "${DATASETS[@]}"; do
   $PYTHON src/merge.py \
     --input_dir "results/$dataset/bug_data" \
     --in_files $GEN_FILES \
-    --output_file "results/$dataset/bug_data/${dataset}_pdb_multi.json" \
+    --output_file "results/$dataset/bug_data/${dataset}_pdb_wild.json" \
     --samples_per_group 5 \
     --max_lines_per_block 4 \
     --min_lines_per_block 2 \
@@ -151,7 +151,7 @@ for dataset in "${DATASETS[@]}"; do
   $PYTHON -c "
 import json
 from collections import Counter
-data = json.load(open('results/$dataset/bug_data/${dataset}_pdb_multi.json'))
+data = json.load(open('results/$dataset/bug_data/${dataset}_pdb_wild.json'))
 print(f'Total entries: {len(data)}')
 print('Bug counts:', dict(sorted(Counter(d[\"bug_count\"] for d in data).items())))
 print('Models:', dict(sorted(Counter(d.get(\"source_model\",\"unknown\") for d in data).items())))

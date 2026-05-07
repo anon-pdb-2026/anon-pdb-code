@@ -34,8 +34,9 @@ import dspy
 import argparse
 import logging
 import itertools
+from concurrent.futures import ThreadPoolExecutor
 from dataset import get_handler
-from utils import file_diff, apply_diff, verify_block_single_diff, verify_block_diff, parse_diff_to_blocks, single_diff_to_str, str_to_single_diff, rstrip_lines
+from utils import file_diff, apply_diff, verify_block_single_diff, verify_block_diff, verify_span_diff, parse_diff_to_blocks, single_diff_to_str, str_to_single_diff, rstrip_lines
 from module import BugInjector, MultilineBugInjector
 from examples import odc_categories, odc_category_probs, bug_type_examples, multiline_bug_type_examples
 from api_config import resolve_api_key
@@ -76,7 +77,7 @@ def _build_contiguous_ranges(lines, min_size=2, max_size=4):
 
 
 def bug_generate(data, handler, log_file_prefix, bug_per_example, ic_size=4, mode="single",
-                 max_lines_per_block=MAX_MULTILINES):
+                 max_lines_per_block=MAX_MULTILINES, n_workers_llm=4, n_workers_validation=4):
     """
     Generate buggy code from correct solutions.
 
@@ -91,120 +92,124 @@ def bug_generate(data, handler, log_file_prefix, bug_per_example, ic_size=4, mod
     """
     results = []
     if mode == "multi":
-        bug_gen = MultilineBugInjector()
+        bug_gen = MultilineBugInjector(max_lines_per_block=max_lines_per_block)
         action_examples = multiline_bug_type_examples
     else:
         bug_gen = BugInjector()
         action_examples = bug_type_examples
 
+    def _generate_one(item, count):
+        """Try to generate one valid bug for item; return log_entry dict or None."""
+        task_id = item.get("task_id") + f"_{count}"
+        gt_solution = item.get("gt_solution")
+        task_prompt = item.get("task_prompt")
+        log_entry = copy.deepcopy(item)
+        log_entry["task_id"] = task_id
+
+        bug_type = np.random.choice(list(odc_category_probs.keys()), p=list(odc_category_probs.values()))
+        bug_def = odc_categories[bug_type]["Definition"]
+        if len(odc_categories[bug_type]["Examples"]) <= ic_size:
+            bug_examples = list(odc_categories[bug_type]["Examples"].items())
+        else:
+            bug_examples_idx = np.random.choice(range(len(odc_categories[bug_type]["Examples"].keys())), ic_size,
+                                                replace=False)
+            all_examples = list(odc_categories[bug_type]["Examples"].items())
+            bug_examples = [all_examples[i] for i in bug_examples_idx]
+
+        cross_category_examples = []
+        if mode == "multi":
+            other_cats = [c for c in odc_categories.keys() if c != bug_type]
+            picked_cats = random.sample(other_cats, min(2, len(other_cats)))
+            for oc in picked_cats:
+                subs = list(odc_categories[oc]["Examples"].items())
+                sub, expl = subs[random.randint(0, len(subs) - 1)]
+                expl_short = expl.split("\nBug Example:")[0].strip()
+                cross_category_examples.append((f"{oc} / {sub}", expl_short))
+        bug_type_sum = [bug_type, bug_def, bug_examples, cross_category_examples]
+
+        if bug_type == "Algorithm":
+            action_type = action_examples[random.randint(0, len(action_examples) - 1)]
+        else:
+            action_type = action_examples[-1]
+
+        # NOTE: [edge case callout] deletion is restricted to lines whose
+        # removal still leaves syntactically valid code (see handler.mark_editable_lines).
+        if action_type.startswith("Delete"):
+            candidate_lines = log_entry["deletable_lines"]
+        else:
+            candidate_lines = log_entry["editable_lines"]
+
+        if mode == "multi":
+            contiguous_ranges = _build_contiguous_ranges(
+                candidate_lines, min_size=MIN_MULTILINES, max_size=max_lines_per_block)
+            if not contiguous_ranges:
+                return None
+            num_ranges = min(5, len(contiguous_ranges))
+            selected_ranges = random.sample(contiguous_ranges, num_ranges)
+            action_on_lines = [action_type, selected_ranges]
+        else:
+            selected_lines_idx = np.random.choice(range(len(candidate_lines)),
+                                                  len(candidate_lines) // 2, replace=False)
+            selected_lines = [candidate_lines[i] for i in selected_lines_idx]
+            action_on_lines = [action_type, selected_lines]
+
+        try:
+            response = bug_gen(task_prompt=task_prompt, gt_solution=gt_solution, bug_type=bug_type_sum,
+                               action_on_lines=action_on_lines)
+            log_entry["bug_type"] = bug_type
+            log_entry["bug_subtype"] = response.subtype
+            log_entry["buggy_code"] = response.buggy_code
+            _, _, json_diff = file_diff(gt_solution, log_entry["buggy_code"].strip())
+            if json_diff is not None:
+                lines_limit = max_lines_per_block if mode == "multi" else 1
+                min_limit = MIN_MULTILINES if mode == "multi" else 1
+                # NOTE: [design] multi-line mode uses span-based validation so that
+                # code-reorder bugs (Add+Delete at nearby positions) are accepted even
+                # when file_diff splits them into disjoint blocks. Single-line mode
+                # keeps the strict block_count=1 check.
+                if mode == "multi":
+                    diff_ok = verify_span_diff(json_diff, max_span=lines_limit,
+                                               min_changes=min_limit, max_changes=lines_limit)[0]
+                else:
+                    diff_ok = verify_block_diff(json_diff, block_count=1,
+                                                max_lines_per_block=1, min_lines_per_block=1)[0]
+                if diff_ok:
+                    edited_line_no = int(str(list(json_diff.keys())[0]).strip())
+                    if edited_line_no <= log_entry["frozen_lines"]:
+                        print("Edit frozen lines:", edited_line_no)
+                        return None
+                    else:
+                        if mode == "multi":
+                            allowed_line_no = [l[0] for r in selected_ranges for l in r]
+                        else:
+                            allowed_line_no = [l[0] for l in selected_lines]
+                        if edited_line_no not in allowed_line_no:
+                            print(f"Allowed lines {allowed_line_no}, but the edit is: ",
+                                  json.dumps(json_diff, indent=2))
+                        log_entry["diff"] = json_diff
+                        n_blocks = len(parse_diff_to_blocks(json_diff))
+                        log_entry["bug_count"] = n_blocks
+                        return log_entry
+                else:
+                    print("Block validation failed: ", json.dumps(json_diff, indent=2))
+                    return None
+            else:
+                print("JSON diff wrong format from the response.")
+                return None
+        except Exception as e:
+            print(f"Error processing task_id {task_id}: {e}")
+            return None
+
     for count in range(bug_per_example):
         print(f"Generating buggy code step {count} (mode={mode})")
-        for index, item in tqdm.tqdm(enumerate(data)):
-            task_id = item.get("task_id") + f"_{count}"
-            gt_solution = item.get("gt_solution")
-            task_prompt = item.get("task_prompt")
-            log_entry = copy.deepcopy(item)
-            log_entry["task_id"] = task_id
-
-            # NOTE: [design thought] category sampled per-example per-pass so
-            # the final dataset's category mix matches odc_category_probs in
-            # expectation even when some generations fail verification.
-            bug_type = np.random.choice(list(odc_category_probs.keys()), p=list(odc_category_probs.values()))
-            bug_def = odc_categories[bug_type]["Definition"]
-            if len(odc_categories[bug_type]["Examples"]) <= ic_size:
-                bug_examples = list(odc_categories[bug_type]["Examples"].items())
-            else:
-                bug_examples_idx = np.random.choice(range(len(odc_categories[bug_type]["Examples"].keys())), ic_size,
-                                                    replace=False)
-                all_examples = list(odc_categories[bug_type]["Examples"].items())
-                bug_examples = [all_examples[i] for i in bug_examples_idx]
-
-            # NOTE: [design thought] sample 2 extra subtypes from OTHER ODC
-            # categories to inspire cross-category blended multiline bugs. Only used
-            # in multi mode.
-            cross_category_examples = []
-            if mode == "multi":
-                other_cats = [c for c in odc_categories.keys() if c != bug_type]
-                picked_cats = random.sample(other_cats, min(2, len(other_cats)))
-                for oc in picked_cats:
-                    subs = list(odc_categories[oc]["Examples"].items())
-                    sub, expl = subs[random.randint(0, len(subs) - 1)]
-                    # Use just the explanation, drop the multi-line 'Bug Example:' code block.
-                    expl_short = expl.split("\nBug Example:")[0].strip()
-                    cross_category_examples.append((f"{oc} / {sub}", expl_short))
-            bug_type_sum = [bug_type, bug_def, bug_examples, cross_category_examples]
-
-            if bug_type == "Algorithm":
-                action_type = action_examples[random.randint(0, len(action_examples) - 1)]
-            else:
-                action_type = action_examples[-1]
-
-            # NOTE: [edge case callout] deletion is restricted to lines whose
-            # removal still leaves syntactically valid code (see handler.mark_editable_lines).
-            if action_type.startswith("Delete"):
-                candidate_lines = log_entry["deletable_lines"]
-            else:
-                candidate_lines = log_entry["editable_lines"]
-
-            if mode == "multi":
-                # Build contiguous ranges of MIN_MULTILINES..max_lines_per_block lines
-                # from the candidate lines, then present these ranges to the LLM.
-                # This ensures the LLM picks from valid contiguous regions.
-                contiguous_ranges = _build_contiguous_ranges(
-                    candidate_lines, min_size=MIN_MULTILINES, max_size=max_lines_per_block)
-                if not contiguous_ranges:
-                    continue
-                # Select up to 5 random ranges to present
-                num_ranges = min(5, len(contiguous_ranges))
-                selected_ranges = random.sample(contiguous_ranges, num_ranges)
-                action_on_lines = [action_type, selected_ranges]
-            else:
-                selected_lines_idx = np.random.choice(range(len(candidate_lines)),
-                                                      len(candidate_lines) // 2, replace=False)
-                selected_lines = [candidate_lines[i] for i in selected_lines_idx]
-                action_on_lines = [action_type, selected_lines]
-
-            try:
-                response = bug_gen(task_prompt=task_prompt, gt_solution=gt_solution, bug_type=bug_type_sum,
-                                   action_on_lines=action_on_lines)
-                log_entry["bug_type"] = bug_type
-                log_entry["bug_subtype"] = response.subtype
-                log_entry["buggy_code"] = response.buggy_code
-                # NOTE: [pedagogical] file_diff(gt, buggy) returns the FORWARD diff
-                # gt -> buggy. verify_block_diff asserts it forms exactly one block
-                # of the right shape; anything weirder (multi-block, wrong size) is dropped.
-                _, _, json_diff = file_diff(gt_solution, log_entry["buggy_code"].strip())
-                if json_diff is not None:
-                    # Single mode: exactly 1 block with 1 line.
-                    # Multi mode: exactly 1 block with MIN_MULTILINES..max_lines_per_block lines.
-                    lines_limit = max_lines_per_block if mode == "multi" else 1
-                    min_limit = MIN_MULTILINES if mode == "multi" else 1
-                    if verify_block_diff(json_diff, block_count=1, max_lines_per_block=lines_limit,
-                                         min_lines_per_block=min_limit)[0]:
-                        edited_line_no = int(list(json_diff.keys())[0])
-                        # NOTE: [edge case callout] frozen_lines are the prompt/signature
-                        # prefix -- editing them would change the task itself, not the solution.
-                        if edited_line_no <= log_entry["frozen_lines"]:
-                            log_entry["diff"] = None
-                            print("Edit frozen lines:", edited_line_no)
-                        else:
-                            if mode == "multi":
-                                allowed_line_no = [l[0] for r in selected_ranges for l in r]
-                            else:
-                                allowed_line_no = [l[0] for l in selected_lines]
-                            if edited_line_no not in allowed_line_no:
-                                print(f"Allowed lines {allowed_line_no}, but the edit is: ",
-                                      json.dumps(json_diff, indent=2))
-                            log_entry["diff"] = json_diff
-                            log_entry["bug_count"] = 1
-                            results.append(log_entry)
-                    else:
-                        log_entry["diff"] = None
-                        print("Block validation failed: ", json.dumps(json_diff, indent=2))
-                else:
-                    print("JSON diff wrong format from the response.")
-            except Exception as e:
-                print(f"Error processing task_id {task_id}: {e}")
+        workers = min(n_workers_llm, len(data))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_generate_one, item, count) for item in data]
+            from concurrent.futures import as_completed as _as_completed
+            for fut in tqdm.tqdm(_as_completed(futures), total=len(futures), desc=f"step {count}"):
+                entry = fut.result()
+                if entry is not None:
+                    results.append(entry)
 
     # NOTE: [design thought] Checkpoint the raw generated bugs before the
     # atomicity/verify phase. The verify step shells out to the dataset
@@ -244,7 +249,7 @@ def bug_generate(data, handler, log_file_prefix, bug_per_example, ic_size=4, mod
 
         # NOTE: [pedagogical] range(1, k) gives proper non-empty subsets only:
         # size 0 = buggy code itself (already verified), size k = full revert = GT.
-        for revert_size in range(1, k):
+        for revert_size in range(1, 2):  # only single-line revert; full 2^k-2 is too expensive for large k
             for revert_combo in _itertools.combinations(range(k), revert_size):
                 # Invert each reverted edit (Add <-> Delete; swap original/modified).
                 revert_diff = {}
@@ -279,7 +284,7 @@ def bug_generate(data, handler, log_file_prefix, bug_per_example, ic_size=4, mod
     formatted_gt = handler.save_formatted_gt(log_file_prefix + "_bug_gen_gt", combined_entries)
     verify_file = handler.build_verify_unit_test(log_file_prefix + "_bug_verify", combined_entries, sol_field="buggy_code")
     try:
-        fail_ids, correct_ids, _ = handler.verify_unit_test(verify_file, gt_file=formatted_gt, timeout=1800)
+        fail_ids, correct_ids, f2p_info = handler.verify_unit_test(verify_file, gt_file=formatted_gt, timeout=1800, n_workers=n_workers_validation)
     except Exception as e:
         print(f"Error verifying. Save first.")
         with open(log_file_prefix + "_bug.json", "w") as f:
@@ -309,6 +314,12 @@ def bug_generate(data, handler, log_file_prefix, bug_per_example, ic_size=4, mod
             # NOTE: [design thought] strip the trailing "_<pass_index>" suffix so
             # downstream composition can merge multiple distinct bugs per original task.
             entry["is_buggy"] = True
+            # Attach FAIL_TO_PASS / PASS_TO_PASS from the validation report so
+            # downstream cross-file evaluation can run Docker unit checks.
+            f2p = f2p_info.get(entry["task_id"], {})
+            if isinstance(f2p, dict):
+                entry["FAIL_TO_PASS"] = f2p.get("FAIL_TO_PASS", [])
+                entry["PASS_TO_PASS"] = f2p.get("PASS_TO_PASS", [])
             entry["task_id"] = entry["task_id"].rsplit("_", 1)[0]
             new_data.append(entry)
         elif entry["task_id"] in correct_ids:
@@ -400,7 +411,18 @@ def bug_compose(buggy_data, max_bugs, compose_per_example, stride=2, max_lines_p
         "gt_solution": None,
         "task_prompt": None,
         "diff_blocks": [],
-        "test": None
+        "repo": None,
+        "image_name": None,
+        "target_file": None,
+        "FAIL_TO_PASS": None,
+        "PASS_TO_PASS": None,
+        "is_buggy": None,
+        "bug_type": None,
+        "bug_subtype": None,
+        "gt_length": None,
+        "frozen_lines": None,
+        "editable_lines": None,
+        "deletable_lines": None,
     })
 
     filtered_buggy_data = []
@@ -410,7 +432,18 @@ def bug_compose(buggy_data, max_bugs, compose_per_example, stride=2, max_lines_p
             merged[tid]["task_id"] = tid
             merged[tid]["gt_solution"] = entry["gt_solution"]
             merged[tid]["task_prompt"] = entry["task_prompt"]
-            merged[tid]["test"] = entry["test"] if "test" in entry else None
+            merged[tid]["repo"] = entry.get("repo")
+            merged[tid]["image_name"] = entry.get("image_name")
+            merged[tid]["target_file"] = entry.get("target_file")
+            merged[tid]["FAIL_TO_PASS"] = entry.get("FAIL_TO_PASS")
+            merged[tid]["PASS_TO_PASS"] = entry.get("PASS_TO_PASS")
+            merged[tid]["is_buggy"] = entry.get("is_buggy")
+            merged[tid]["bug_type"] = entry.get("bug_type")
+            merged[tid]["bug_subtype"] = entry.get("bug_subtype")
+            merged[tid]["gt_length"] = entry.get("gt_length")
+            merged[tid]["frozen_lines"] = entry.get("frozen_lines")
+            merged[tid]["editable_lines"] = entry.get("editable_lines")
+            merged[tid]["deletable_lines"] = entry.get("deletable_lines")
 
         # For multiline, entry["diff"] is a full block dict (possibly multi-line)
         # NOTE: [design thought] dedup by diff string -- two LLM passes sometimes
@@ -419,9 +452,19 @@ def bug_compose(buggy_data, max_bugs, compose_per_example, stride=2, max_lines_p
         existing_strs = [diff_block_to_str(b) for b in merged[tid]["diff_blocks"]]
         if diff_str not in existing_strs:
             gt_diff = file_diff(entry["buggy_code"], entry["gt_solution"], cleaned=True)[2]
-            ver, err = verify_block_diff(gt_diff, block_count=1, max_lines_per_block=max_lines_per_block)
+            # NOTE: [design] use span-based check for multi-line reverse diffs
+            # (same rationale as call site 1: code-reorder bugs create non-contiguous diffs).
+            if max_lines_per_block > 1:
+                ver, err = verify_span_diff(gt_diff, max_span=max_lines_per_block,
+                                            min_changes=1, max_changes=max_lines_per_block)
+            else:
+                ver, err = verify_block_diff(gt_diff, block_count=1, max_lines_per_block=1)
             if ver:
-                merged[tid]["diff_blocks"].append(entry["diff"])
+                # NOTE: [design] only single-block diffs go into diff_blocks for k≥2
+                # composition; span-based multi-block diffs are used only as k=1 bugs.
+                n_forward_blocks = len(parse_diff_to_blocks(entry["diff"]))
+                if n_forward_blocks == 1:
+                    merged[tid]["diff_blocks"].append(entry["diff"])
                 del entry["diff"]
                 entry["gt_diff"] = gt_diff
                 filtered_buggy_data.append(entry)
@@ -467,7 +510,18 @@ def bug_compose(buggy_data, max_bugs, compose_per_example, stride=2, max_lines_p
                     "bug_count": len(blocks),
                     "gt_diff": gt_diff,
                     "buggy_code": buggy_code,
-                    "test": item["test"],
+                    "repo": item["repo"],
+                    "image_name": item["image_name"],
+                    "target_file": item["target_file"],
+                    "FAIL_TO_PASS": item["FAIL_TO_PASS"],
+                    "PASS_TO_PASS": item["PASS_TO_PASS"],
+                    "is_buggy": item["is_buggy"],
+                    "bug_type": item["bug_type"],
+                    "bug_subtype": item["bug_subtype"],
+                    "gt_length": item["gt_length"],
+                    "frozen_lines": item["frozen_lines"],
+                    "editable_lines": item["editable_lines"],
+                    "deletable_lines": item["deletable_lines"],
                 }
                 k_bug_data.append(entry)
 
@@ -576,7 +630,10 @@ def gen_main(args):
         print("DRY RUN: using DummyLM, no API calls will be made")
     else:
         api_key = resolve_api_key(args.model_name, args.model_api_file)
-        generator = dspy.LM(args.model_name, api_key=api_key, temperature=args.temperature, max_tokens=args.max_tokens)
+        thinking_kwargs = {}
+        if getattr(args, 'reasoning_effort', None):
+            thinking_kwargs['reasoning_effort'] = args.reasoning_effort
+        generator = dspy.LM(args.model_name, api_key=api_key, temperature=args.temperature, max_tokens=args.max_tokens, **thinking_kwargs)
         dspy.settings.configure(lm=generator)
 
     # Generate bugs
@@ -588,7 +645,9 @@ def gen_main(args):
     print(f"Bug generation with model: {args.model_name} (mode={mode}, max_lines_per_block={max_lpb})")
     handler.mark_editable_lines(raw_data)
     _, buggy_data = bug_generate(raw_data, handler, log_file_prefix, args.bug_per_time,
-                                 mode=mode, max_lines_per_block=max_lpb)
+                                 mode=mode, max_lines_per_block=max_lpb,
+                                 n_workers_llm=args.n_workers_llm,
+                                 n_workers_validation=args.n_workers_validation)
 
     # Compose bugs
     composed_buggy_data = bug_compose(buggy_data, args.max_bugs, args.bug_per_time,
@@ -626,6 +685,13 @@ if __name__ == "__main__":
                         help="Bug mode: 'single' for single-line bugs, 'multi' for multiline blocks")
     parser.add_argument("--max_lines_per_block", type=int, default=MAX_MULTILINES,
                         help=f"Max lines per bug block in multiline mode (default {MAX_MULTILINES})")
+    parser.add_argument("--reasoning_effort", type=str, default=None,
+                        choices=["none", "minimal", "low", "medium", "high", "xhigh", "default"],
+                        help="Enable extended thinking with specified effort level (e.g. 'high')")
+    parser.add_argument("--n_workers_llm", type=int, default=4,
+                        help="Parallel workers for LLM generation (default: 4)")
+    parser.add_argument("--n_workers_validation", type=int, default=4,
+                        help="Parallel workers for Docker unit-test validation (default: 4)")
 
     logging.getLogger().setLevel(logging.ERROR)
 

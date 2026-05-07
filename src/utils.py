@@ -287,10 +287,12 @@ def parse_diff_to_blocks(diffs, ordered=True):
         tp = edit["type"]
 
         # starting from the second last, check if consecutive edits
+        # NOTE: [design] also merge Add(N) adjacent to Delete/Modify(N-1) since
+        # file_diff represents code moves as Add+Delete at adjacent line positions.
         if prev_tp is not None:
             if tp in set_del_mod and line_no == prev_line_no - 1:
                 consecutive = True
-            elif tp in set_add and line_no == prev_line_no:
+            elif tp in set_add and (line_no == prev_line_no or line_no == prev_line_no - 1):
                 consecutive = True
             else:
                 consecutive = False
@@ -404,6 +406,168 @@ def verify_block_single_diff(diff, block_count=-1, stride=0):
     Verify each block has only a single line diff. Original single-line version.
     """
     return verify_block_diff(diff, block_count=block_count, stride=stride, max_lines_per_block=1)
+
+
+def verify_span_diff(diff, max_span=30, min_changes=2, max_changes=30):
+    """
+    Span-based validation for multi-line bugs: all changed lines within a max_span
+    line window, and total changed entries within [min_changes, max_changes].
+
+    Unlike verify_block_diff, this allows non-contiguous blocks inside the span —
+    capturing code-reorder bugs (Add + Delete at nearby positions) that file_diff
+    represents as disjoint blocks.
+
+    :param diff: the diff dict from file_diff
+    :param max_span: max physical line range (max_line - min_line + 1)
+    :param min_changes: minimum total changed entries (dict size)
+    :param max_changes: maximum total changed entries
+    :return: (passed, reason_string)
+    """
+    if not diff:
+        return False, "Empty diff."
+    line_nos = [int(str(k).strip()) for k in diff.keys()]
+    span = max(line_nos) - min(line_nos) + 1
+    total = len(diff)
+    if span > max_span:
+        return False, f"Span {span} exceeds max_span {max_span}."
+    if total < min_changes:
+        return False, f"Total changes {total} < min_changes {min_changes}."
+    if total > max_changes:
+        return False, f"Total changes {total} > max_changes {max_changes}."
+    return True, ""
+
+
+def make_file_context(code: str, file_path: str = "solution.py") -> str:
+    """
+    Format code with line numbers in SWE-bench style for LLM patch prompts.
+
+    Example output:
+        [start of solution.py]
+        1 def foo(x):
+        2     return x + 1
+        [end of solution.py]
+    """
+    numbered = "\n".join(f"{i + 1} {line}" for i, line in enumerate(code.splitlines()))
+    return f"[start of {file_path}]\n{numbered}\n[end of {file_path}]"
+
+
+def _extract_patch_from_llm_output(text: str) -> str:
+    """
+    Extract a unified diff from LLM output, handling markdown code fences.
+
+    Tries, in order:
+      1. ```diff ... ``` or ```patch ... ``` fenced block
+      2. Plain ``` ... ``` block that contains @@ markers
+      3. Raw text if it already looks like a diff
+    """
+    import re
+    fence = re.compile(r'```(?:diff|patch)?\n(.*?)```', re.DOTALL)
+    for m in fence.finditer(text):
+        candidate = m.group(1).strip()
+        if '@@' in candidate:
+            return candidate
+
+    # Any fenced block that contains @@ (LLM may omit language tag)
+    any_fence = re.compile(r'```[^\n]*\n(.*?)```', re.DOTALL)
+    for m in any_fence.finditer(text):
+        candidate = m.group(1).strip()
+        if '@@' in candidate:
+            return candidate
+
+    # Raw text looks like a diff
+    if '@@' in text:
+        return text.strip()
+
+    return ""
+
+
+def apply_unified_patch(buggy_code: str, patch_str: str, reverse: bool = False) -> str | None:
+    """
+    Apply a unified diff patch string to buggy_code (pure Python, no external tools).
+
+    When reverse=True the patch is applied backwards: '+' lines are treated as
+    consumed (removed) and '-' lines as inserted (added), and hunk positions are
+    taken from the dst (+) side of the @@ header instead of the src (-) side.
+    This lets us recover the original clean file from a buggy one given the bug
+    patch (as used by SWE-smith, where `patch` introduces the bug).
+
+    Returns the patched code string, or None if the patch cannot be parsed/applied.
+    Hunks are applied in reverse order to preserve line indices during multi-hunk patches.
+    """
+    import re
+
+    hunk_re = re.compile(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@')
+    patch_lines = patch_str.splitlines()
+
+    # Locate hunk start positions
+    hunk_starts = [i for i, l in enumerate(patch_lines) if hunk_re.match(l)]
+    if not hunk_starts:
+        return None
+
+    # Parse each hunk
+    hunks = []
+    for idx, start in enumerate(hunk_starts):
+        m = hunk_re.match(patch_lines[start])
+        src_start = int(m.group(1))
+        dst_start = int(m.group(2))
+        apply_start = dst_start if reverse else src_start
+        end = hunk_starts[idx + 1] if idx + 1 < len(hunk_starts) else len(patch_lines)
+        body = [l for l in patch_lines[start + 1:end] if not l.startswith('\\')]
+        hunks.append((apply_start, body))
+
+    result = buggy_code.splitlines()
+
+    # Apply in reverse so earlier hunks don't shift later line numbers
+    for apply_start, body in reversed(hunks):
+        removed = []   # lines consumed from source (context + deleted)
+        added = []     # lines written to target (context + inserted)
+        for line in body:
+            if line.startswith('-'):
+                if reverse:
+                    added.append(line[1:])
+                else:
+                    removed.append(line[1:])
+            elif line.startswith('+'):
+                if reverse:
+                    removed.append(line[1:])
+                else:
+                    added.append(line[1:])
+            else:
+                # space = context line; empty line in body treated as context too
+                content = line[1:] if line.startswith(' ') else ''
+                removed.append(content)
+                added.append(content)
+
+        start_idx = apply_start - 1            # convert to 0-based
+        end_idx = start_idx + len(removed)
+        end_idx = min(end_idx, len(result))    # clamp to actual file length
+
+        result[start_idx:end_idx] = added
+
+    return '\n'.join(result)
+
+
+def patch_to_pred_diff(patch_str: str, buggy_code: str) -> tuple[dict, str]:
+    """
+    Convert an LLM-output unified diff into (pred_diff, corrected_code).
+
+    pred_diff uses PDB's line-level format:
+        {"line_no": {"type": "Modify"|"Add"|"Delete", "original": str, "modified": str}}
+
+    Returns ({}, buggy_code) if the patch is empty, malformed, or cannot be applied.
+    Internally applies the patch to buggy_code and runs file_diff() on the result,
+    so coord system is consistent with gt_diff throughout the pipeline.
+    """
+    raw = _extract_patch_from_llm_output(patch_str)
+    if not raw:
+        return {}, buggy_code
+
+    corrected = apply_unified_patch(buggy_code, raw)
+    if corrected is None:
+        return {}, buggy_code
+
+    _, _, pred_diff = file_diff(buggy_code, corrected, cleaned=True)
+    return pred_diff, corrected
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 #!/bin/bash
-# Bug correction + evaluation with 9 models on both datasets.
+# Bug correction + evaluation with 9 models on a PDB subset, fanned out
+# across that subset's source datasets.
 #
 # Usage:  bash scripts/run_debug_eval.sh <subset>
-#   <subset> ∈ {single, single-hard, multi}  (default: single)
-#     single       -> results/<ds>/bug_data/<ds>_pdb_single.json
-#     single-hard  -> results/<ds>/bug_data/<ds>_pdb_single_hard.json
-#     multi        -> results/<ds>/bug_data/<ds>_pdb_multi.json
+#   <subset> ∈ {single, wild}  (default: single)
+#     single -> single-line bugs;       BCB + LCB.
+#               results/<ds>/bug_data/<ds>_pdb_single.json
+#     wild   -> multi-line + repo bugs; BCB + LCB + SWE-smith.
+#               results/<ds>/bug_data/<ds>_pdb_wild.json
 #
 # Thinking models (temperature=1.0, max_tokens=32000):
 #   deepseek-reasoner, gemini-2.5-pro, gpt-5.1-codex,
@@ -18,15 +20,14 @@ set -e
 
 SUBSET="${1:-single}"
 case "$SUBSET" in
-  single)      FILE_TAG="pdb_single" ;;
-  single-hard) FILE_TAG="pdb_single_hard" ;;
-  multi)       FILE_TAG="pdb_multi" ;;
+  single) FILE_TAG="pdb_single";  DATASETS=("bigcodebench" "livecodebench") ;;
+  wild)   FILE_TAG="pdb_wild";    DATASETS=("bigcodebench" "livecodebench" "swesmith") ;;
   *)
-    echo "ERROR: unknown subset '$SUBSET' (expected: single | single-hard | multi)"
+    echo "ERROR: unknown subset '$SUBSET' (expected: single | wild)"
     exit 2
     ;;
 esac
-echo "Subset: $SUBSET  (file tag: $FILE_TAG)"
+echo "Subset: $SUBSET  (file tag: $FILE_TAG; datasets: ${DATASETS[*]})"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -86,11 +87,9 @@ NON_THINKING_MODELS=(
   "together_ai/Kimi-K2-Instruct"
 )
 
-DATASETS=("bigcodebench" "livecodebench")
-
-# --- Multi subset requires --mode multi so tolerance defaults to 1 ---
+# --- Wild subset uses --mode multi so tolerance defaults to 1 ---
 MODE_ARGS=()
-if [[ "$SUBSET" == "multi" ]]; then
+if [[ "$SUBSET" == "wild" ]]; then
   MODE_ARGS=(--mode multi)
 fi
 
@@ -154,7 +153,8 @@ echo "============================================"
 echo "=== Union Summary ($SUBSET) ==="
 echo "============================================"
 
-FILE_TAG="$FILE_TAG" MAX_ROUNDS="$MAX_ROUNDS" $PYTHON -c "
+FILE_TAG="$FILE_TAG" MAX_ROUNDS="$MAX_ROUNDS" \
+  DATASETS_CSV="$(IFS=,; echo "${DATASETS[*]}")" $PYTHON -c "
 import json, os, glob
 from collections import defaultdict
 
@@ -163,7 +163,7 @@ from collections import defaultdict
 # aggregates the FINAL round across datasets into a union-per-model table.
 file_tag = os.environ['FILE_TAG']
 final_round = int(os.environ['MAX_ROUNDS'])
-datasets = ['bigcodebench', 'livecodebench']
+datasets = os.environ['DATASETS_CSV'].split(',')
 union = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0])  # model -> sums + total n
 
 for dataset in datasets:

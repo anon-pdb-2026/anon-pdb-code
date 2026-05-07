@@ -161,14 +161,90 @@ You should output two things:
     buggy_solution = dspy.OutputField(desc="Code with only ONE bug introduced, no comments on the modified line")
 
 
-class IntroduceMultilineBug(dspy.Signature):
-    task_prompt = dspy.InputField(desc="The programming task description for context")
-    correct_solution = dspy.InputField(desc="A correct Python code solution")
-    bug_type = dspy.InputField(desc="The type of bug to add")
-    action_on_lines = dspy.InputField(desc="Contiguous line ranges to choose from and their code")
-    subtype = dspy.OutputField(desc="Subtype of the introduced bug")
-    buggy_solution = dspy.OutputField(
-        desc=f"Full code with exactly ONE contiguous {MIN_MULTILINES}-{MAX_MULTILINES} line bug block")
+def make_multiline_bug_signature(min_lines: int, max_lines: int):
+    """Factory: create an IntroduceMultilineBug Signature with dynamic min/max line counts."""
+
+    class _Sig(dspy.Signature):
+        task_prompt = dspy.InputField(desc="The programming task description for context")
+        correct_solution = dspy.InputField(desc="A correct Python code solution")
+        bug_type = dspy.InputField(desc="The type of bug to add")
+        action_on_lines = dspy.InputField(desc="Contiguous line ranges to choose from and their code")
+        subtype = dspy.OutputField(desc="Subtype of the introduced bug")
+        buggy_solution = dspy.OutputField(
+            desc=f"Full code with exactly ONE contiguous {min_lines}-{max_lines} line bug block")
+
+    _Sig.__doc__ = f"""Your task is to introduce ONE realistic, human-authored bug that spans a contiguous
+BLOCK of {min_lines} to {max_lines} CONSECUTIVE lines in a Python solution.
+
+Think like a sleep-deprived engineer reviewing their own code — the bug should be a plausible
+slip a real developer might commit, not an obviously synthetic corruption.
+
+You will be given:
+PART 1: A task description.
+PART 2: A correct solution.
+PART 3: A set of contiguous line RANGES you may choose from (e.g., "Lines 10-13").
+
+Pick exactly ONE of the given ranges. Within that range, change {min_lines}-{max_lines} consecutive lines.
+
+GOOD multiline bug patterns to draw inspiration from:
+- Flip a loop/branch condition AND mis-adjust a dependent expression in the next line(s)
+  (e.g., `for i in range(n):` -> `for i in range(n-1):` together with `x[i+1] = ...` -> `x[i] = ...`).
+- Off-by-one in a bound AND a corresponding off-by-one in an index or slice on a following line.
+- Negate a guard AND drop the compensating branch body (swap then/else behavior).
+- Swap two related variables across consecutive assignments (group1 / group2 aliasing).
+- Replace a correct function call pair where both calls have their argument order subtly wrong.
+- Forget to update one side of a symmetric two-line update (update left, forget right).
+
+You may BLEND bug categories when it is natural. A Checking flip on one line can cascade into
+an Assignment correction on the next line — that is exactly what real human bugs look like.
+
+CRITICAL RULES:
+- Only change lines within ONE of the given contiguous ranges; keep every other line EXACTLY the same.
+- All changed lines must be CONSECUTIVE (no gaps between modified lines).
+- Number of changed lines: {min_lines} to {max_lines}.
+- Every changed line must change RUNTIME BEHAVIOR. Comment-only edits, whitespace edits, or
+  consistent variable renames do NOT count and will be rejected.
+- Each changed line must be ESSENTIAL. If one edit could be reverted to the GT while the rest
+  still cause a test failure, that edit was not essential — drop it and pick a block where
+  every line genuinely contributes.
+- DO NOT invent fake library APIs (e.g., `server.bind_address`, `server.listen_backlog`,
+  `platform.linux_distribution` on Python 3.8+). Use real Python / stdlib / common-library names.
+  If a real API doesn't exist, pick a different bug.
+- DO NOT introduce trivial bugs: typos, syntax errors, undefined variables, missing imports,
+  or deleting a for/if/while/with/try header without its body.
+- Preserve indentation of surrounding code.
+- Do NOT add comments to modified lines, AND do NOT replace an existing line with a comment.
+- Do NOT delete the header of a control-flow block (if/for/while/with/try/except) while keeping
+  the body — this creates unreachable or nonsensical code.
+
+BAD BUG EXAMPLES — never produce output that matches these patterns:
+
+(A) Deletion causing syntax errors:
+       ORIG:
+         if os.path.exists(plot_path):
+             plt.savefig(plot_path)
+         plt.close()
+       BAD BUGGY:
+             plt.savefig(plot_path)           <-- header deleted, structure broken
+         plt.close()
+
+(B) Fake APIs that don't exist: `server.bind_address(host, port)`,
+    `server.listen_backlog(5)`, `msg.set_content(subject)` when msg is an email.MIMEText,
+    `platform.linux_distribution()` on Python 3.8+.
+
+(C) Non-atomic edits: a block where reverting any single line to the GT would still leave
+    the tests failing. That means only the non-reverted lines caused the failure, and the
+    reverted line was superfluous.
+
+Output:
+- The subtype label for the introduced bug (if mixed, pick the dominant one or "Others").
+- The full buggy code with exactly one contiguous block of {min_lines}-{max_lines} lines changed."""
+
+    return _Sig
+
+
+# Default signature using config constants (used when max_lines_per_block not specified)
+IntroduceMultilineBug = make_multiline_bug_signature(MIN_MULTILINES, MAX_MULTILINES)
 
 
 IntroduceMultilineBug.__doc__ = f"""Your task is to introduce ONE realistic, human-authored bug that spans a contiguous
@@ -371,6 +447,41 @@ Your response should include:
     corrected_solution = dspy.OutputField(desc="The corrected solution")
 
 
+class PatchMinimalDebug(dspy.Signature):
+    """Debug the given buggy file and output ONLY a unified diff patch. Make minimal edits.
+Do NOT reformat correct lines. Do NOT add or edit comments.
+Do NOT generate a new solution from scratch.
+
+The input consists of two parts:
+- A problem description outlining the intended functionality.
+- The full buggy file with line numbers in [start of <filename>] / [end of <filename>] format.
+
+Output format: a unified diff patch that can be applied with `git apply`, like:
+--- a/<filename>
++++ b/<filename>
+@@ -N,M +N,M @@
+ context
+-removed line
++added line
+ context"""
+    problem_description = dspy.InputField(desc="The problem description")
+    buggy_file = dspy.InputField(desc="Full file content with line numbers")
+    patch = dspy.OutputField(desc="Unified diff patch with minimal edits")
+
+
+class PatchFreeDebug(dspy.Signature):
+    """Debug the given buggy file and output a unified diff patch.
+
+The input consists of two parts:
+- A problem description outlining the intended functionality.
+- The full buggy file with line numbers in [start of <filename>] / [end of <filename>] format.
+
+Output format: a unified diff patch that can be applied with `git apply`."""
+    problem_description = dspy.InputField(desc="The problem description")
+    buggy_file = dspy.InputField(desc="Full file content with line numbers")
+    patch = dspy.OutputField(desc="Unified diff patch")
+
+
 class Rewriter(dspy.Module):
     def __init__(self):
         super().__init__()
@@ -448,9 +559,11 @@ class BugInjector(dspy.Module):
 
 
 class MultilineBugInjector(dspy.Module):
-    def __init__(self):
+    def __init__(self, max_lines_per_block: int = MAX_MULTILINES):
         super().__init__()
-        self.introduce_bug = dspy.Predict(IntroduceMultilineBug)
+        sig = make_multiline_bug_signature(MIN_MULTILINES, max_lines_per_block)
+        self.introduce_bug = dspy.Predict(sig)
+        self.max_lines = max_lines_per_block
 
     def forward(self, task_prompt, gt_solution, bug_type, action_on_lines):
         """
@@ -473,7 +586,7 @@ class MultilineBugInjector(dspy.Module):
                 bug_type_str += f"Other {i + 1}. {sub}: {expl}\n"
 
         bug_type_str += (f"\nBe creative and think like a real human who made a mistake. "
-                         f"The bug must span {MIN_MULTILINES}-{MAX_MULTILINES} contiguous lines where EVERY line is essential "
+                         f"The bug must span {MIN_MULTILINES}-{self.max_lines} contiguous lines where EVERY line is essential "
                          f"(reverting any single line to the GT must still leave the tests failing). "
                          f"If the subtype does not match any example, output the subtype as \"Others\".")
 
@@ -523,6 +636,8 @@ class Debugger(dspy.Module):
         self.free_debugger = dspy.Predict(FreeDebug)
         self.free_feedback_debugger = dspy.Predict(FreeFeedbackDebug)
         self.free_unit_feedback_debugger = dspy.Predict(FreeUnitFeedbackDebug)
+        self.patch_minimal_debugger = dspy.Predict(PatchMinimalDebug)
+        self.patch_free_debugger = dspy.Predict(PatchFreeDebug)
         if model:
             self.external_model = ExternalModelWrapper(model)
         else:
@@ -586,10 +701,24 @@ class Debugger(dspy.Module):
                 failed_attempts=failures,
                 unit_tests=test_cases,
             )
+        elif mode == "patch_minimal":
+            # buggy_code is expected to be pre-formatted with make_file_context()
+            response = self.patch_minimal_debugger(
+                problem_description=task_prompt,
+                buggy_file=buggy_code,
+            )
+        elif mode == "patch_free":
+            response = self.patch_free_debugger(
+                problem_description=task_prompt,
+                buggy_file=buggy_code,
+            )
         else:
             raise ValueError("Prompt mode not implemented")
 
-        if response.corrected_solution:
+        # Patch modes return raw patch text; code modes return the full corrected solution.
+        if mode.startswith("patch_"):
+            output = response.patch or ""
+        elif response.corrected_solution:
             match = CODE_BLOCK_REGEX.search(response.corrected_solution)
             match_simple = SIMPLE_CODE_BLOCK_REGEX.search(response.corrected_solution)
             if match:

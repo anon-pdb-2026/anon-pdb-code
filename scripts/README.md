@@ -18,7 +18,7 @@ Thin bash wrappers over the Python entrypoints in [../src/](../src/). They exist
 ```bash
 # One model
 bash scripts/simple_debug_eval.sh <subset> <model>
-#   <subset> ∈ {single, single-hard, multi}
+#   <subset> ∈ {single, wild}
 #   <model>  = any dspy model name, e.g. openai/gpt-5.1-codex
 
 # All reference models
@@ -110,7 +110,7 @@ Per-dataset lines land in `bash_log/dbg_*.log` when datasets run in parallel sub
 | Script | Purpose |
 |---|---|
 | [`run_bug_gen_single.sh`](run_bug_gen_single.sh) | Generate + merge a **single-line** PDB dataset (`<bench>_pdb_single.json`) from 3 generators × 2 datasets. Preflights API keys first. |
-| [`run_bug_gen_multi.sh`](run_bug_gen_multi.sh) | Same flow for **multi-line** bugs (`<bench>_pdb_multi.json`), reading per-generator `long_<name>.json` splits. |
+| [`run_bug_gen_multi.sh`](run_bug_gen_multi.sh) | Same flow for **multi-line** bugs (`<bench>_pdb_wild.json`), reading per-generator `long_<name>.json` splits. |
 
 ## How to generate your own data
 
@@ -144,7 +144,7 @@ Per-dataset lines land in `bash_log/dbg_*.log` when datasets run in parallel sub
 
 ```bash
 bash scripts/run_bug_gen_single.sh   # produces <bench>_pdb_single.json
-bash scripts/run_bug_gen_multi.sh    # produces <bench>_pdb_multi.json
+bash scripts/run_bug_gen_multi.sh    # produces <bench>_pdb_wild.json
 ```
 
 Both drivers run all 6 (model × dataset) jobs concurrently and do a cheap API preflight first so you don't discover a dead key halfway through.

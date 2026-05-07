@@ -202,9 +202,10 @@ python src/preprocess.py --dataset_name your_dataset_name \
 
 ## Existing Datasets
 
-| Dataset | Status | Evaluation Tool | Install |
-|---|---|---|---|
-| `bigcodebench` | Complete | `bigcodebench.evaluate` (vendored v0.2.5) | `dataset/bigcodebench/install/` — `uv sync --extra eval` |
-| `livecodebench` | Complete | `lcb_runner.runner.custom_evaluator` | `dataset/livecodebench/install/` — `uv sync` |
+| Dataset | Status | Evaluation Tool | Install | Used by subset |
+|---|---|---|---|---|
+| `bigcodebench` | Complete | `bigcodebench.evaluate` (vendored v0.2.5) | `dataset/bigcodebench/install/` — `uv sync --extra eval` | `single`, `wild` |
+| `livecodebench` | Complete | `lcb_runner.runner.custom_evaluator` | `dataset/livecodebench/install/` — `uv sync` | `single`, `wild` |
+| `swesmith` | Complete | `swesmith.harness.valid` (Docker; vendored under `install/SWE-{smith,bench}/`) | none — vendored source trees, Docker images pulled at runtime | `wild` |
 
 See each dataset's own `README.md` for full install + verification instructions.

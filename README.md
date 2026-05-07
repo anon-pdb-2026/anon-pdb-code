@@ -39,23 +39,25 @@ Drop one key file per provider into [keys/](keys/) (each file is a single line w
 
 ---
 
-## 🧪 Evaluate a model on PDB (single / single-hard / multi)
+## 🧪 Evaluate a model on PDB (single / wild)
 
-Bug-correct + score one model across both BigCodeBench and LiveCodeBench:
+Bug-correct + score one model across the source datasets that make up the chosen subset:
 
 ```bash
 bash scripts/simple_debug_eval.sh <subset> <model>
 ```
 
-- `<subset>` ∈ `single`, `single-hard`, `multi` (points at `<bench>_pdb_<subset>.json`).
+- `<subset>` ∈ `single`, `wild` (points at `<bench>_pdb_<subset>.json`).
+  - `single` covers single-line bugs over **BigCodeBench + LiveCodeBench** (5,751 examples — the *PDB-Single* release).
+  - `wild` covers multi-line and repository-level bugs over **BigCodeBench + LiveCodeBench + SWE-smith** (484 examples — the *PDB-Wild* release).
 - `<model>` is any [dspy](https://dspy.ai/) model string: `openai/gpt-5.1-codex`, `anthropic/claude-sonnet-4-5-20250929`, `deepseek/deepseek-chat`, etc. Local / self-hosted endpoints are supported too — see [scripts/README.md](scripts/README.md#local--self-hosted-model-evaluation).
 
 Example output (Evaluator per-dataset lines + driver union):
 
 ```
-[summary] gpt-5.1-codex on bigcodebench_pdb_single_hard round 1: unit=0.733 prec=0.548 rec=0.777 f1=0.602 (n=2510)
-[summary] gpt-5.1-codex on livecodebench_pdb_single_hard round 1: unit=0.914 prec=0.465 rec=0.789 f1=0.540 (n=3224)
-  union  unit=0.828 prec=0.500 rec=0.783 f1=0.566 (n=5734)
+[summary] gpt-5.1-codex on bigcodebench_pdb_single round 1: unit=0.731 prec=0.547 rec=0.780 f1=0.602 (n=2525)
+[summary] gpt-5.1-codex on livecodebench_pdb_single round 1: unit=0.909 prec=0.460 rec=0.775 f1=0.533 (n=3226)
+  union  unit=0.831 prec=0.498 rec=0.777 f1=0.561 (n=5751)
 ```
 
 To loop a fixed list of reference models instead of one, run [scripts/run_debug_eval.sh](scripts/run_debug_eval.sh) with the same subset arg. Model list, token budgets, and run-wide knobs (debug mode, rounds, temperature) are configurable at the top of each driver — see [scripts/README.md](scripts/README.md) for details.
@@ -74,6 +76,8 @@ python src/evaluator.py \
   --eval_set_name bigcodebench_pdb_single \
   --max_iter 1
 ```
+
+For the *wild* subset, replace `bigcodebench` with `livecodebench` or `swesmith`, and use the corresponding `*_pdb_wild_*.json` debug-results file as input.
 
 The input format matches what `bug_correct.py` writes (a list of entries with `task_id`, `buggy_code`, `gt_solution`, `debug_results.solution`, `gt_diff`, …). At the end, the same `[summary]` line as above is printed. Output-file paths and schema are documented in [scripts/README.md](scripts/README.md#output-files).
 
@@ -101,7 +105,8 @@ python src/bug_generation.py \
 The generator produces `oai_buggy_code_<timestamp>.json` under `results/<bench>/bug_data/`. Three-model fan-out drivers:
 
 - [scripts/run_bug_gen_single.sh](scripts/run_bug_gen_single.sh) — single-line (3 models × 2 datasets, then merge into `<bench>_pdb_single.json`)
-- [scripts/run_bug_gen_multi.sh](scripts/run_bug_gen_multi.sh) — multi-line (reads per-model `long_<name>.json` splits, merges into `<bench>_pdb_multi.json`)
+- [scripts/run_bug_gen_multi.sh](scripts/run_bug_gen_multi.sh) — multi-line (reads per-model `long_<name>.json` splits, merges into `<bench>_pdb_wild.json` for the BCB / LCB partitions of *PDB-Wild*)
+- [src/gen_swesmith_data.py](src/gen_swesmith_data.py) + [src/create_swesmith_data.py](src/create_swesmith_data.py) — Docker-driven extraction of the SWE-smith partition of *PDB-Wild* (`results/swesmith/bug_data/swesmith_pdb_wild.json`)
 
 Both scripts preflight API keys against a cheap probe before spending credits, and they run all 6 (model × dataset) jobs concurrently.
 
@@ -139,13 +144,13 @@ The debugger sees its prior failed patches appended to `failed_attempts`, and th
 ```bash
 python src/bug_correct.py \
   --dataset_name bigcodebench \
-  --input_file bigcodebench_pdb_single_hard.json \
-  --eval_set_name bigcodebench_pdb_single_hard \
+  --input_file bigcodebench_pdb_single.json \
+  --eval_set_name bigcodebench_pdb_single \
   --model_name openai/gpt-5.1-codex \
   --debug_mode minimal --max_rounds 3 \
   --reload_first_round \
-  --reload_result_file results/bigcodebench/debug_results/gpt-5.1-codex_on_bigcodebench_pdb_single_hard_round_1.json \
-  --reload_score_file  results/bigcodebench/eval_results/gpt-5.1-codex_on_bigcodebench_pdb_single_hard_round_1_scores.json \
+  --reload_result_file results/bigcodebench/debug_results/gpt-5.1-codex_on_bigcodebench_pdb_single_round_1.json \
+  --reload_score_file  results/bigcodebench/eval_results/gpt-5.1-codex_on_bigcodebench_pdb_single_round_1_scores.json \
   --temperature 1.0 --max_tokens 32000
 ```
 
@@ -156,14 +161,14 @@ Same as iterative, but `--use_tests` puts the hidden unit tests into the prompt 
 ```bash
 python src/bug_correct.py \
   --dataset_name bigcodebench \
-  --input_file bigcodebench_pdb_single_hard.json \
-  --eval_set_name bigcodebench_pdb_single_hard_agentic \
+  --input_file bigcodebench_pdb_single.json \
+  --eval_set_name bigcodebench_pdb_single_agentic \
   --model_name openai/gpt-5.1-codex \
   --debug_mode minimal --max_rounds 3 \
   --use_tests --error_msg \
   --reload_first_round \
-  --reload_result_file results/bigcodebench/debug_results/gpt-5.1-codex_on_bigcodebench_pdb_single_hard_round_1.json \
-  --reload_score_file  results/bigcodebench/eval_results/gpt-5.1-codex_on_bigcodebench_pdb_single_hard_round_1_scores.json \
+  --reload_result_file results/bigcodebench/debug_results/gpt-5.1-codex_on_bigcodebench_pdb_single_round_1.json \
+  --reload_score_file  results/bigcodebench/eval_results/gpt-5.1-codex_on_bigcodebench_pdb_single_round_1_scores.json \
   --temperature 1.0 --max_tokens 32000
 ```
 
@@ -174,8 +179,8 @@ Swaps the single-pass dspy LM for an autonomous [Claude Code](https://claude.com
 ```bash
 python src/bug_correct.py \
   --dataset_name bigcodebench \
-  --input_file bigcodebench_pdb_single_hard.json \
-  --eval_set_name bigcodebench_pdb_single_hard_claudecode \
+  --input_file bigcodebench_pdb_single.json \
+  --eval_set_name bigcodebench_pdb_single_claudecode \
   --model_name claude-code-agent \
   --use_claude_code \
   --debug_mode minimal --max_rounds 1 \
@@ -190,47 +195,49 @@ Each round of every flavor writes `<model>_on_<eval_set>_round_<k>.json` + its s
 
 ## 🔬 Reproduce experiments
 
-### Regenerate `<bench>_pdb_single.json`
+### Regenerate the synthesized partitions of *PDB-Single* and *PDB-Wild*
 
 ```bash
-bash scripts/run_bug_gen_single.sh          # 3 generators × 2 datasets + merge
+bash scripts/run_bug_gen_single.sh   # 3 generators × 2 datasets, merges into <bench>_pdb_single.json (initial pool)
+bash scripts/run_bug_gen_multi.sh    # 3 generators × 2 datasets on tasks ≥ 35 lines, merges into <bench>_pdb_wild.json
 ```
 
-### Build `<bench>_pdb_single_hard.json`
+`run_bug_gen_multi.sh` requires the `dataset/<bench>/data/long_<name>.json` per-generator splits of tasks with ≥ 35-line canonical solutions.
 
-After scoring the 9 reference models on `_pdb_single`, filter to tasks solved perfectly by < 7 of 9:
+### Build the SWE-smith partition of *PDB-Wild*
+
+```bash
+python src/gen_swesmith_data.py --image <swesmith-image> --output dataset/swesmith/data/pdb_swe_input.json
+python src/create_swesmith_data.py --instances <SWE-smith-instances> --output results/swesmith/bug_data/swesmith_pdb_wild.json
+```
+
+This Docker-driven path produces the 228-example real-repository slice of *PDB-Wild*.
+
+### Apply the easy-case filter for *PDB-Single*
+
+After scoring 9 reference models on the synthesized *PDB-Single* pool, filter to tasks not solved perfectly by ≥ 7 of 9 reference debuggers:
 
 ```bash
 bash scripts/run_debug_eval.sh single       # populates eval_results/
-# then run the hard-filter cell in visualize/visualize.ipynb, or use the
-# self-contained routine at the bottom of scripts/push_to_hf.py which follows
-# the same logic.
+# then run the easy-case-filter cell in visualize/visualize.ipynb, or use the
+# self-contained routine at the bottom of scripts/push_to_hf.py.
 ```
 
-This is exactly the procedure that produces the **PDB-Single-Hard** release set (5,734 examples).
-
-### Regenerate `<bench>_pdb_multi.json`
-
-Requires the `dataset/<bench>/data/long_<name>.json` per-generator splits of tasks with ≥ 35-line canonical solutions.
-
-```bash
-bash scripts/run_bug_gen_multi.sh
-```
+This is exactly the procedure that produces the **PDB-Single** release set (5,751 examples).
 
 ### Full 9-model evaluation
 
 ```bash
-bash scripts/run_debug_eval.sh single-hard
-bash scripts/run_debug_eval.sh multi
+bash scripts/run_debug_eval.sh single        # PDB-Single  (BCB + LCB)
+bash scripts/run_debug_eval.sh wild          # PDB-Wild    (BCB + LCB + SWE-smith)
 ```
 
-Final reproduction targets (union over BCB + LCB):
+Final reproduction targets (union across the subset's source datasets):
 
-| subset | n | models evaluated | top precision model | top unit-score model |
-|---|---|---|---|---|
-| PDB-Single | 7,591 | 9 | Claude-Sonnet-4.5 | 	DeepSeek-V3.2-Thinking |
-| PDB-Single-Hard | 5,751 | 9 | Claude-Sonnet-4.5 | 	DeepSeek-V3.2-Thinking |
-| PDB-Multi | 256 | 9 | Claude-Sonnet-4.5 | 	DeepSeek-V3.2-Thinking |
+| subset | n | sources | models evaluated | top precision model | top unit-test model |
+|---|---|---|---|---|---|
+| PDB-Single | 5,751 | BCB + LCB | 9 | Claude-Sonnet-4.5 | DeepSeek-V3.2-Thinking |
+| PDB-Wild   | 484   | BCB + LCB + SWE-smith | 9 | Claude-Sonnet-4.5 | DeepSeek-V3.2-Thinking |
 
 ---
 
