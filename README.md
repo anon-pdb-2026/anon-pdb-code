@@ -1,12 +1,15 @@
 # PDB: Precise Debugging Benchmarking
 
-> *Anonymous release for NeurIPS 2026 Datasets & Benchmarks review. Paper,
-> project page, leaderboard, and HuggingFace org links will be added in the
-> camera-ready version.*
+📄 Paper *(coming soon)* &nbsp;·&nbsp;
+🌐 [Project page](https://anon-pdb-2026.github.io) &nbsp;·&nbsp;
+🤗 [Datasets](https://huggingface.co/anon-pdb) &nbsp;·&nbsp;
+🏆 [Leaderboard](https://anon-pdb-2026.github.io/leaderboard.html)
+
+> *Anonymous release for NeurIPS 2026 Datasets & Benchmarks review.*
 
 **PDB** is an automatic pipeline that turns any coding dataset into a *debugging* benchmark with fine-grained metrics. Beyond binary unit-test scores, PDB evaluates a debugger with **edit-level precision** (did the model touch only the lines it had to?) and **bug-level recall** (did it fix every fault?). This rewards targeted fixes and penalizes the regeneration behavior frontier LLMs often fall back on.
 
-- Released datasets (anonymous): `PDB-Single`, `PDB-Wild`. (HuggingFace mirror links added in camera-ready.)
+- Released datasets: [`PDB-Single`](https://huggingface.co/datasets/anon-pdb/PDB-Single) · [`PDB-Wild`](https://huggingface.co/datasets/anon-pdb/PDB-Wild)
 
 > TL;DR — Frontier models like GPT-5.1-Codex and DeepSeek-V3.2-Thinking top unit-test leaderboards (>76%) but score at or below 45% on precision: they pass tests by rewriting, not repairing. PDB makes that gap measurable.
 
@@ -17,8 +20,8 @@
 We use [`uv`](https://docs.astral.sh/uv/) for reproducible environments.
 
 ```bash
-git clone <anonymous-repo-url>
-cd <repo>
+git clone https://github.com/anon-pdb-2026/anon-pdb-code
+cd anon-pdb-code
 uv sync                        # creates .venv, installs locked deps
 source .venv/bin/activate      # optional; scripts already point at .venv/bin/python
 ```
