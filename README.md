@@ -237,7 +237,7 @@ Final reproduction targets (union across the subset's source datasets):
 | subset | n | sources | models evaluated | top precision model | top unit-test model |
 |---|---|---|---|---|---|
 | PDB-Single | 5,751 | BCB + LCB | 9 | Claude-Sonnet-4.5 | DeepSeek-V3.2-Thinking |
-| PDB-Wild   | 484   | BCB + LCB + SWE-smith | 9 | Claude-Sonnet-4.5 | DeepSeek-V3.2-Thinking |
+| PDB-Wild   | 484   | BCB + LCB + SWE-smith | 9 | Claude-Sonnet-4.7 | Gemini-3.1-Pro |
 
 ---
 
