@@ -181,7 +181,42 @@ or `dataset/livecodebench/README.md`).
 
 Place raw data files in `data/<your_dataset_name>/`.
 
-### 7. Test
+### 7. Verify test-suite adequacy (before bug generation)
+
+PDB uses your dataset's unit tests as the semantic oracle for three things: validating
+injected bugs (a bug is kept only if the suite fails on it), atomicity filtering, and
+precision/recall scoring. A weak suite degrades *gracefully* on the first two, bugs the
+suite cannot detect are filtered out, so the benchmark shrinks but never contains
+undetectable bugs. The residual risk is at **scoring time**: a model patch that passes a
+weak suite while being actually incorrect (a scoring false positive).
+
+For reference, we audited this risk on PDB-Single (LiveCodeBench) by submitting 216
+test-passing, ground-truth-differing model patches to LeetCode's official online judge:
+4/216 were rejected, a 1.85% false-positive rate (see
+`false_positive_testset.md` and `..._batch2.md` for the full audit).
+Rejected patches had markedly lower edit-level precision than accepted ones (mean 0.25
+vs. 0.45), so low-precision patches are where functional scoring is least reliable.
+
+Before running bug generation on a new dataset, check and strengthen its suites:
+
+1. **Coverage check.** Run the suite under a coverage tool on each
+   ground-truth solution and confirm the editable lines are actually executed by at
+   least one test. Lines never executed cannot host a detectable bug: drop them from
+   injection, or drop the task if too few covered lines remain.
+
+2. **Strengthen weak suites.** Options in increasing order of effort: LLM test
+   amplification validated against the ground truth (keep only generated tests that the
+   ground-truth solution passes), human-LLM collaborative test generation, or online-judge
+   validation where available. Never add a test without first confirming the ground-truth
+   solution passes it, a wrong expected output flips true positives into false negatives.
+
+4. **Patch gaps with local regression tests.** For LiveCodeBench we ship a
+   `tests_override.json` mechanism at
+   `dataset/livecodebench/install/tests_override.json`: a JSON map from `question_id` to
+   extra test cases, merged into the private test set at load time. Every downstream
+   evaluation picks the extra tests up automatically. Mirror this pattern for your own dataset's harness.
+   
+### 8. Test
 
 Run preprocessing to verify everything works end to end:
 
