@@ -118,6 +118,9 @@ The default pool is GPT-5.1-Codex + Claude-4.5-Sonnet + Gemini-2.5-Pro. Swap the
 
 Implement a `DatasetHandler` subclass under `dataset/<your-dataset>/` and register it in `dataset/__init__.py`. See [dataset/README.md](dataset/README.md) for the full interface + vendored-sandbox layout. The rest of the pipeline is dataset-agnostic once the handler exists.
 
+> [!CAUTION]
+> **Important:** verify your dataset's test-suite adequacy before bug generation! PDB uses the unit tests as the semantic oracle for bug validation, atomicity filtering, and scoring. See [dataset/README.md](dataset/README.md) step 7 for the adequacy checklist (coverage check, mutation-adequacy probe, test strengthening).
+
 ### Parameters reference
 
 | flag | default | meaning |
