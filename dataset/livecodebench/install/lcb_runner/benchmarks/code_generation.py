@@ -1,4 +1,5 @@
 import json
+import os
 import zlib
 import pickle
 import base64
@@ -124,6 +125,18 @@ class CodeGenerationProblem:
 def load_code_generation_dataset(release_version="release_v1", start_date=None, end_date=None) -> list[CodeGenerationProblem]:
     dataset = load_dataset("livecodebench/code_generation_lite", split="test", version_tag=release_version, trust_remote_code=True)
     dataset = [CodeGenerationProblem(**p) for p in dataset]  # type: ignore
+
+    # Merge extra tests from tests_override.json (question_id -> list of Test
+    # dicts) at the install root. get_evaluation_sample() flattens public +
+    # private tests, so appended tests reach every downstream evaluation.
+    override_file = os.path.join(os.path.dirname(__file__), "..", "..", "tests_override.json")
+    if os.path.exists(override_file):
+        with open(override_file) as f:
+            overrides = json.load(f)
+        for problem in dataset:
+            for test in overrides.get(problem.question_id, []):
+                problem.private_test_cases.append(Test(**test))
+
     if start_date is not None:
         p_start_date = datetime.strptime(start_date, "%Y-%m-%d")
         dataset = [e for e in dataset if p_start_date <= e.contest_date]
