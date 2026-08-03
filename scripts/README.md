@@ -118,6 +118,8 @@ Per-dataset lines land in `bash_log/dbg_*.log` when datasets run in parallel sub
 
 2. **Validate the source data first.** Run [`src/preprocess.py`](../src/preprocess.py) on every input file to drop tasks whose ground-truth solution fails the sandbox's own unit tests or has too few editable lines. The valid subset is written back as `<stem>_valid.json` next to the original and is what the bug-generation step should consume.
 
+   **Important**: Also verify the dataset's **test-suite adequacy** before generating bugs. See [../dataset/README.md](../dataset/README.md) step 7 for the full checklist (coverage check, mutation-adequacy probe, test strengthening.
+   
    ```bash
    python src/preprocess.py --dataset_name bigcodebench \
      --input_file claude.json gemini.json gpt.json
@@ -127,9 +129,9 @@ Per-dataset lines land in `bash_log/dbg_*.log` when datasets run in parallel sub
 
    Use your `<stem>_valid.json` (e.g., `claude_valid.json`) as the validated data for bug generation.
 
-3. Pick your generator pool by editing the `MODELS` + `PREFIXES` arrays at the top of the driver. Anything supported by LiteLLM works.
+5. Pick your generator pool by editing the `MODELS` + `PREFIXES` arrays at the top of the driver. Anything supported by LiteLLM works.
 
-4. Tune the generation hyperparameters (also near the top of the driver) — the ones that matter:
+6. Tune the generation hyperparameters (also near the top of the driver) — the ones that matter:
 
 | Flag on `bug_generation.py` | Default | Meaning |
 |---|---|---|
